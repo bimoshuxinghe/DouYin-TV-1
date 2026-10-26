@@ -45,6 +45,10 @@ public final class QrLoginClient {
     private static final String CHECK_URL =
             "https://login.douyin.com/passport/web/check_qrconnect/?aid=6383&token=";
 
+    /** ttwid 注册接口(字节跳动通行设备标识，免签名)。 */
+    private static final String TTWID_REGISTER_URL =
+            "https://ttwid.bytedance.com/ttwid/union/register/";
+
     private static final String DESKTOP_UA =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                     + "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -80,28 +84,107 @@ public final class QrLoginClient {
         }
     }
 
+    /** 最近一次失败的详情(错误码/描述)，供界面提示定位问题。 */
+    private static volatile String lastError = "";
+
+    public static String getLastError() {
+        return lastError;
+    }
+
+    /** 缓存的 ttwid(设备标识 Cookie)，进程内复用。 */
+    private static volatile String cachedTtwid;
+
+    /**
+     * 注册并返回 ttwid。抖音的 passport 接口强制要求携带该 Cookie，
+     * 缺失会直接返回 error_code 4031 风控拦截。
+     */
+    private static String ensureTtwid() {
+        String cached = cachedTtwid;
+        if (cached != null && !cached.isEmpty()) return cached;
+        try {
+            HttpURLConnection conn = (HttpURLConnection) new URL(TTWID_REGISTER_URL).openConnection();
+            conn.setConnectTimeout(6000);
+            conn.setReadTimeout(8000);
+            conn.setRequestMethod("POST");
+            conn.setRequestProperty("User-Agent", DESKTOP_UA);
+            conn.setRequestProperty("Content-Type", "application/json");
+            conn.setDoOutput(true);
+            try (OutputStream out = conn.getOutputStream()) {
+                out.write(("{\"region\":\"cn\",\"aid\":1768,\"needFid\":false,"
+                        + "\"service\":\"www.ixigua.com\",\"migrate_info\":{\"ticket\":\"\","
+                        + "\"source\":\"node\"},\"cbUrlProtocol\":\"https\",\"union\":true}")
+                        .getBytes(StandardCharsets.UTF_8));
+            }
+            List<String> setCookies = conn.getHeaderFields().get("Set-Cookie");
+            if (setCookies != null) {
+                for (String header : setCookies) {
+                    if (header.startsWith("ttwid=")) {
+                        String value = header.split(";")[0].substring("ttwid=".length());
+                        if (!value.isEmpty()) {
+                            cachedTtwid = value;
+                            Log.d(TAG, "ttwid acquired len=" + value.length());
+                            return value;
+                        }
+                    }
+                }
+            }
+            Log.w(TAG, "ttwid register: no Set-Cookie");
+        } catch (Exception e) {
+            Log.w(TAG, "ttwid register failed", e);
+        }
+        return null;
+    }
+
+    private static String randomMsToken() {
+        String alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        StringBuilder sb = new StringBuilder(116);
+        java.util.Random random = new java.util.Random();
+        for (int i = 0; i < 116; i++) {
+            sb.append(alphabet.charAt(random.nextInt(alphabet.length())));
+        }
+        return sb.toString();
+    }
+
+    private static String buildCookieHeader() {
+        StringBuilder sb = new StringBuilder();
+        String ttwid = ensureTtwid();
+        if (ttwid != null) sb.append("ttwid=").append(ttwid).append("; ");
+        sb.append("msToken=").append(randomMsToken());
+        return sb.toString();
+    }
+
     /**
      * 拉取一个新的登录二维码。必须在后台线程调用。
      *
      * @return 二维码(token + 可直接显示的位图)，失败返回 {@code null}
+     *         (失败详情见 {@link #getLastError()})
      */
     public static QrCode fetchQrCode() {
+        lastError = "";
         try {
             HttpURLConnection conn = open(GET_QRCODE_URL, "GET", null);
             int code = conn.getResponseCode();
             if (code != 200) {
+                lastError = "HTTP " + code;
                 Log.w(TAG, "get_qrcode http " + code);
                 return null;
             }
             JSONObject root = new JSONObject(readAll(conn.getInputStream()));
             JSONObject data = root.optJSONObject("data");
             if (data == null) {
-                Log.w(TAG, "get_qrcode no data: " + root.optString("description", ""));
+                lastError = root.optString("description", "响应无数据");
+                Log.w(TAG, "get_qrcode no data: " + lastError);
+                return null;
+            }
+            if (data.optInt("error_code", 0) != 0) {
+                lastError = "错误码" + data.optInt("error_code", -1) + " "
+                        + data.optString("description", "");
+                Log.w(TAG, "get_qrcode risk control: " + lastError);
                 return null;
             }
             String token = data.optString("token", "");
             if (token.isEmpty()) {
-                Log.w(TAG, "get_qrcode no token: " + root.optString("description", ""));
+                lastError = "响应中无 token";
                 return null;
             }
             Bitmap bitmap = null;
@@ -117,11 +200,12 @@ public final class QrLoginClient {
                 }
             }
             if (bitmap == null) {
-                Log.w(TAG, "qr image unavailable");
+                lastError = "二维码图片下载失败";
                 return null;
             }
             return new QrCode(token, bitmap);
         } catch (Exception e) {
+            lastError = e.getClass().getSimpleName() + ": " + e.getMessage();
             Log.w(TAG, "fetchQrCode failed", e);
             return null;
         }
@@ -208,8 +292,15 @@ public final class QrLoginClient {
         conn.setRequestMethod(method);
         conn.setRequestProperty("User-Agent", DESKTOP_UA);
         conn.setRequestProperty("Referer", "https://www.douyin.com/");
+        conn.setRequestProperty("Origin", "https://www.douyin.com");
         conn.setRequestProperty("Accept", "application/json, text/plain, */*");
         conn.setRequestProperty("Accept-Language", "zh-CN,zh;q=0.9");
+        // 伪装浏览器 CORS 请求特征，降低风控概率。
+        conn.setRequestProperty("Sec-Fetch-Dest", "empty");
+        conn.setRequestProperty("Sec-Fetch-Mode", "cors");
+        conn.setRequestProperty("Sec-Fetch-Site", "same-site");
+        // passport 接口强制要求 ttwid；msToken 用随机值即可。
+        conn.setRequestProperty("Cookie", buildCookieHeader());
         if (body != null) {
             conn.setDoOutput(true);
             conn.setRequestProperty("Content-Type",

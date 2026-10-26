@@ -1549,8 +1549,18 @@ public class PlayerActivity extends Activity implements FeedRepository.Listener 
             handler.post(() -> {
                 if (!qrApiVisible) return;
                 if (qr == null) {
+                    String detail = mulin.tvdy.auth.QrLoginClient.getLastError();
                     qrApiStatusText.setTextColor(0xFFFF5252);
-                    qrApiStatusText.setText("获取二维码失败(网络受限或抖音风控)，可改用「网页登录」");
+                    qrApiStatusText.setText("API获取二维码失败(" + detail + ")，正在切换网页登录…");
+                    // API 通道被风控时自动降级到网页登录(可见WebView加载官方登录页)。
+                    handler.postDelayed(() -> {
+                        if (qrApiVisible) {
+                            qrApiVisible = false;
+                            qrApiOverlay.setVisibility(View.GONE);
+                            handler.removeCallbacks(qrApiPollRunnable);
+                            openQrLogin();
+                        }
+                    }, 1500);
                     return;
                 }
                 qrApiToken = qr.token;
@@ -1668,6 +1678,7 @@ public class PlayerActivity extends Activity implements FeedRepository.Listener 
                 // 页面加载完即开始轮询登录态(每 2 秒，最多约 6 分钟)。
                 if (loginQrVisible) {
                     loginQrStatusText.setText("请用手机抖音扫描屏幕上的二维码");
+                    autoOpenLoginModal();
                 }
                 CookieManager.getInstance().flush();
             }
@@ -1775,6 +1786,38 @@ public class PlayerActivity extends Activity implements FeedRepository.Listener 
         }
         CookieManager.getInstance().flush();
         if (playerView != null) playerView.requestFocus();
+    }
+
+    /**
+     * 抖音首页不一定自动弹出登录框。注入 JS 自动寻找页面上的"登录"按钮
+     * 并用完整鼠标事件序列点击，让官方二维码弹窗出现。最多尝试 20 次。
+     */
+    private void autoOpenLoginModal() {
+        if (loginQrWebView == null) return;
+        loginQrWebView.evaluateJavascript(
+                "(function(){"
+                + "var n=0;"
+                + "var timer=setInterval(function(){"
+                + "n++;"
+                + "try{"
+                + "var els=document.querySelectorAll('button,div,span,a');"
+                + "for(var i=0;i<els.length;i++){"
+                + "var t=(els[i].textContent||'').trim();"
+                + "if((t==='登录'||t==='扫码登录')&&els[i].offsetParent!==null){"
+                + "var r=els[i].getBoundingClientRect();"
+                + "if(r.width>0&&r.width<400&&r.height>0&&r.height<120){"
+                + "['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(tn){"
+                + "var E=tn.indexOf('pointer')===0&&window.PointerEvent?PointerEvent:MouseEvent;"
+                + "els[i].dispatchEvent(new E(tn,{bubbles:true,cancelable:true,composed:true,pointerId:1,pointerType:'mouse',isPrimary:true,button:0}));"
+                + "});"
+                + "clearInterval(timer);return;"
+                + "}"
+                + "}"
+                + "}"
+                + "}catch(e){}"
+                + "if(n>20)clearInterval(timer);"
+                + "},1500);"
+                + "})();", null);
     }
 
     /**
