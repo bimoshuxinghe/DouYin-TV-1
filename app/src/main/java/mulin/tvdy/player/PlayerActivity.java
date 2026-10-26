@@ -74,6 +74,7 @@ import mulin.tvdy.auth.CookieImportHelper;
 import mulin.tvdy.auth.LoginStatusChecker;
 import mulin.tvdy.auth.QrCodeGenerator;
 import androidx.recyclerview.widget.GridLayoutManager;
+import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
 import mulin.tvdy.data.CreatorVideoRepository;
@@ -273,6 +274,16 @@ public class PlayerActivity extends Activity implements FeedRepository.Listener 
     private View featureMenu;
     private final List<View> menuItems = new ArrayList<>();
     private int menuSelectedIndex = 0;
+
+    // --- 评论面板(TikTok/抖音手机版评论区的大屏移植) ---
+    private View commentsPanel;
+    private RecyclerView commentsList;
+    private TextView commentsCountText;
+    private TextView commentsStatusText;
+    private boolean commentsVisible = false;
+    /** 当前面板正在展示的评论所属视频，避免切视频后旧评论串台。 */
+    private String commentsForAwemeId;
+    private CommentsAdapter commentsAdapter;
     private View featureMenuAccountHeader;
     private View featureMenuAccountDivider;
     private ImageView featureMenuAccountAvatar;
@@ -398,6 +409,15 @@ public class PlayerActivity extends Activity implements FeedRepository.Listener 
         featureMenuLogin = findViewById(R.id.featureMenuLogin);
         featureMenuLoginText = findViewById(R.id.featureMenuLoginText);
         featureMenuLogout = findViewById(R.id.featureMenuLogout);
+
+        // 评论面板
+        commentsPanel = findViewById(R.id.commentsPanel);
+        commentsList = findViewById(R.id.commentsList);
+        commentsCountText = findViewById(R.id.commentsCountText);
+        commentsStatusText = findViewById(R.id.commentsStatusText);
+        commentsList.setLayoutManager(new LinearLayoutManager(this));
+        commentsAdapter = new CommentsAdapter();
+        commentsList.setAdapter(commentsAdapter);
 
         cookieLoginOverlay = findViewById(R.id.cookieLoginOverlay);
         handoffRow = findViewById(R.id.handoffRow);
@@ -1097,6 +1117,33 @@ public class PlayerActivity extends Activity implements FeedRepository.Listener 
             return dispatchBackKey(event);
         }
 
+        // 菜单键/信息键直接呼出(或收起)功能菜单。此前只支持"长按OK键500ms"，
+        // 很多电视遥控器的菜单键按了完全没反应，也没有任何提示——这里补上
+        // 标准按键支持，让登录入口随时可达。
+        if ((keyCode == KeyEvent.KEYCODE_MENU
+                || keyCode == KeyEvent.KEYCODE_INFO
+                || keyCode == KeyEvent.KEYCODE_SETTINGS)
+                && event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0
+                && !cookieLoginVisible) {
+            if (featureMenuVisible) {
+                closeFeatureMenu();
+            } else {
+                openFeatureMenu();
+            }
+            return true;
+        }
+
+        // 评论面板打开时：交给 RecyclerView 处理上下滚动/定位，
+        // 其余按键(包括OK/左右)全部吞掉，避免误触底层视频。
+        if (commentsVisible) {
+            if (keyCode == KeyEvent.KEYCODE_DPAD_CENTER
+                    || keyCode == KeyEvent.KEYCODE_ENTER
+                    || keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE) {
+                return true;
+            }
+            return super.dispatchKeyEvent(event);
+        }
+
         // While splash is up: long-press OK opens the menu; short OK retries
         // after a startup timeout.
         if (splashVisible) {
@@ -1227,6 +1274,9 @@ public class PlayerActivity extends Activity implements FeedRepository.Listener 
         if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) {
             if (cookieLoginVisible) {
                 hideCookieLogin();
+                backConsumedSpecially = true;
+            } else if (commentsVisible) {
+                closeCommentsPanel();
                 backConsumedSpecially = true;
             } else if (featureMenuVisible) {
                 closeFeatureMenu();
@@ -1427,6 +1477,127 @@ public class PlayerActivity extends Activity implements FeedRepository.Listener 
         }
     }
 
+    /**
+     * 打开评论面板：展示当前视频的热门评论(免签名直连接口，见
+     * {@link mulin.tvdy.data.NativeCommentClient})。拉取在后台线程，
+     * 完成后仅当面板仍在展示且还是同一条视频时才应用结果。
+     */
+    private void openCommentsPanel() {
+        if (current == null) {
+            Toast.makeText(this, "还没有正在播放的视频", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        commentsVisible = true;
+        commentsPanel.setVisibility(View.VISIBLE);
+        commentsList.requestFocus();
+        loadCommentsFor(current);
+    }
+
+    private void closeCommentsPanel() {
+        commentsVisible = false;
+        commentsPanel.setVisibility(View.GONE);
+        // 面板关闭后把焦点还给播放器，保证遥控器上下键继续切换视频。
+        if (playerView != null) {
+            playerView.requestFocus();
+        }
+        showControls();
+    }
+
+    private void loadCommentsFor(FeedVideo video) {
+        final String awemeId = video.awemeId;
+        commentsForAwemeId = awemeId;
+        commentsAdapter.setItems(new ArrayList<>());
+        commentsStatusText.setVisibility(View.VISIBLE);
+        commentsStatusText.setText("正在加载评论…");
+        commentsCountText.setText("");
+        final long diggCount = video.commentCount;
+        new Thread(() -> {
+            final List<mulin.tvdy.data.NativeCommentClient.Comment> comments =
+                    mulin.tvdy.data.NativeCommentClient.fetch(awemeId, 30);
+            handler.post(() -> {
+                // 面板已关闭或已切到另一条视频：丢弃过期结果。
+                if (!commentsVisible || commentsForAwemeId == null
+                        || !commentsForAwemeId.equals(awemeId)) {
+                    return;
+                }
+                if (comments == null) {
+                    commentsStatusText.setText("评论加载失败，按返回键关闭后重试");
+                    return;
+                }
+                commentsAdapter.setItems(comments);
+                commentsCountText.setText("· " + formatCount(diggCount) + " 条");
+                commentsStatusText.setVisibility(
+                        comments.isEmpty() ? View.VISIBLE : View.GONE);
+                commentsStatusText.setText(
+                        comments.isEmpty() ? "还没有评论" : commentsStatusText.getText());
+            });
+        }, "comments-load").start();
+    }
+
+    /** 评论列表适配器：头像 + 昵称 + 内容 + (日期 · IP属地 · 点赞数)。 */
+    private static final class CommentsAdapter
+            extends RecyclerView.Adapter<CommentsAdapter.Holder> {
+
+        private final List<mulin.tvdy.data.NativeCommentClient.Comment> items =
+                new ArrayList<>();
+
+        void setItems(List<mulin.tvdy.data.NativeCommentClient.Comment> list) {
+            items.clear();
+            if (list != null) items.addAll(list);
+            notifyDataSetChanged();
+        }
+
+        @Override
+        public Holder onCreateViewHolder(android.view.ViewGroup parent, int viewType) {
+            android.view.View v = android.view.LayoutInflater.from(parent.getContext())
+                    .inflate(R.layout.item_comment, parent, false);
+            return new Holder(v);
+        }
+
+        @Override
+        public void onBindViewHolder(Holder holder, int position) {
+            mulin.tvdy.data.NativeCommentClient.Comment c = items.get(position);
+            SimpleImageLoader.load(c.avatarUrl, holder.avatar);
+            holder.nick.setText(c.nick == null || c.nick.isEmpty() ? "抖音网友" : c.nick);
+            holder.text.setText(c.text);
+            StringBuilder meta = new StringBuilder();
+            if (c.dateText != null && !c.dateText.isEmpty()) {
+                meta.append(c.dateText);
+            }
+            if (c.ipLabel != null && !c.ipLabel.isEmpty()) {
+                if (meta.length() > 0) meta.append(" · ");
+                meta.append(c.ipLabel);
+            }
+            if (c.diggCount > 0) {
+                if (meta.length() > 0) meta.append(" · ");
+                meta.append("赞 ").append(c.diggCount);
+            }
+            holder.meta.setText(meta.toString());
+            holder.meta.setVisibility(
+                    meta.length() > 0 ? View.VISIBLE : View.GONE);
+        }
+
+        @Override
+        public int getItemCount() {
+            return items.size();
+        }
+
+        final class Holder extends RecyclerView.ViewHolder {
+            final ImageView avatar;
+            final TextView nick;
+            final TextView text;
+            final TextView meta;
+
+            Holder(android.view.View v) {
+                super(v);
+                avatar = v.findViewById(R.id.commentAvatar);
+                nick = v.findViewById(R.id.commentNick);
+                text = v.findViewById(R.id.commentText);
+                meta = v.findViewById(R.id.commentMeta);
+            }
+        }
+    }
+
     private void moveMenuSelection(int delta) {
         int size = menuItems.size();
         menuSelectedIndex = ((menuSelectedIndex + delta) % size + size) % size;
@@ -1450,6 +1621,8 @@ public class PlayerActivity extends Activity implements FeedRepository.Listener 
             startCookieLogin();
         } else if (id == R.id.featureMenuCreator) {
             openCreatorGrid();
+        } else if (id == R.id.featureMenuComments) {
+            openCommentsPanel();
         } else if (id == R.id.featureMenuLogout) {
             logout();
         }
@@ -1463,6 +1636,7 @@ public class PlayerActivity extends Activity implements FeedRepository.Listener 
             featureMenuLogin.setVisibility(View.GONE);
             featureMenuLogout.setVisibility(View.VISIBLE);
             menuItems.add(findViewById(R.id.featureMenuCreator));
+            menuItems.add(findViewById(R.id.featureMenuComments));
             menuItems.add(featureMenuLogout);
         } else {
             featureMenuAccountHeader.setVisibility(View.GONE);
@@ -1471,6 +1645,7 @@ public class PlayerActivity extends Activity implements FeedRepository.Listener 
             featureMenuLogout.setVisibility(View.GONE);
             menuItems.add(featureMenuLogin);
             menuItems.add(findViewById(R.id.featureMenuCreator));
+            menuItems.add(findViewById(R.id.featureMenuComments));
         }
         if (menuSelectedIndex >= menuItems.size()) {
             menuSelectedIndex = 0;

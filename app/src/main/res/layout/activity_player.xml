@@ -78,6 +78,19 @@
             android:paddingBottom="24dp"
             android:visibility="gone">
 
+            <TextView
+                android:id="@+id/controlsHint"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="10dp"
+                android:shadowColor="#CC000000"
+                android:shadowDx="0"
+                android:shadowDy="1"
+                android:shadowRadius="3"
+                android:text="菜单键或长按OK键：登录 · 查看评论 · 更多"
+                android:textColor="#80FFFFFF"
+                android:textSize="12sp" />
+
             <!-- TikTok TV 左下角信息区：作者 → 标题 → 音乐 -->
             <LinearLayout
                 android:id="@+id/authorRow"
@@ -398,6 +411,20 @@
         </LinearLayout>
 
         <LinearLayout
+            android:id="@+id/featureMenuComments"
+            style="@style/FeatureMenuRow">
+
+            <ImageView
+                style="@style/FeatureMenuIcon"
+                android:src="@drawable/ic_comment" />
+
+            <TextView
+                style="@style/FeatureMenuLabel"
+                android:text="查看评论" />
+
+        </LinearLayout>
+
+        <LinearLayout
             android:id="@+id/featureMenuLogout"
             style="@style/FeatureMenuRow"
             android:visibility="gone">
@@ -599,5 +626,7 @@
     </FrameLayout>
 
     <include layout="@layout/overlay_creator_grid" />
+
+    <include layout="@layout/overlay_comments" />
 
 </FrameLayout>
