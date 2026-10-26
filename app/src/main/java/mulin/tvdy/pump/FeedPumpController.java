@@ -1606,6 +1606,31 @@ public final class FeedPumpController implements PageRequester {
 
 
 
+    /**
+     * 原生直连推荐流兜底：页面完全没发出 API 请求时，用
+     * {@link mulin.tvdy.data.NativeFeedClient} 持续供片。拉取在后台线程，
+     * 入队在主线程(addVideosBlocking 的监听器要求主线程)，并自动触发
+     * PlayerActivity 的 onBufferChanged 开播逻辑。
+     */
+    private void kickstartNativeFeed() {
+        if (creatorMode) return;
+        new Thread(() -> {
+            final java.util.List<mulin.tvdy.data.FeedVideo> videos =
+                    mulin.tvdy.data.NativeFeedClient.fetch(8);
+            if (videos == null || videos.isEmpty()) return;
+            handler.post(() -> {
+                try {
+                    if (repository.bufferSize() < 12) {
+                        repository.addVideosBlocking(videos);
+                        Log.d(TAG, "native feed kickstart applied n=" + videos.size());
+                    }
+                } catch (Exception e) {
+                    Log.w(TAG, "native feed kickstart failed", e);
+                }
+            });
+        }, "native-feed-kickstart").start();
+    }
+
     private void runFeedKickstart(int generation, int attempt) {
 
         if (generation != kickstartGeneration || webView == null) return;
@@ -1622,6 +1647,11 @@ public final class FeedPumpController implements PageRequester {
         injectHooks();
 
         if (apiCallsSeen == 0 && !pageFetchInFlight && !awaitingLiteJsonFeed) {
+
+            // 页面始终没发出任何 /aweme/ 请求(常见于电视系统 WebView 过旧、
+            // SPA 启动失败)。原生直连推荐流接口不依赖 WebView，用它兜底供片，
+            // 避免用户陷入无限重试；NativeFeedClient 自带 8 秒节流。
+            kickstartNativeFeed();
 
             repository.releasePageRequest();
 
@@ -1653,9 +1683,8 @@ public final class FeedPumpController implements PageRequester {
 
             if (apiCallsSeen == 0) {
 
-                notifyStatus("未检测到 API 请求，请更新系统 WebView 或等待自动重试");
-
-                notifyError("WebView 未捕获到抖音 API 请求");
+                // 原生直连推荐流已接管供片(见 kickstartNativeFeed)，不再报错。
+                notifyStatus("网页加载不可用，已切换直连推荐流");
 
             } else {
 

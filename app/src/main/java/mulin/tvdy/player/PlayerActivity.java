@@ -646,6 +646,8 @@ public class PlayerActivity extends Activity implements FeedRepository.Listener 
 
         repository.addListener(this);
         creatorRepository.addListener(this::onCreatorVideosChanged);
+        // 原生直连推荐流先走(1-2秒)，数据泵随后补充个性化内容。
+        fetchNativeFeedInitial();
         startInitialPlayback();
         StartupTrace.mark("PlayerActivity.onCreate exit");
     }
@@ -766,6 +768,31 @@ public class PlayerActivity extends Activity implements FeedRepository.Listener 
                     splashAnimation.cancelAnimation();
                 })
                 .start();
+    }
+
+    /**
+     * 原生直连推荐流(免 WebView)：onCreate 立即调用，通常 1-2 秒返回，
+     * 是「抖音 App 式秒进」的第一内容来源。数据泵(需 10-30 秒启动 SPA)之后
+     * 到达的个性化内容会进入同一队列去重追加，两者互不冲突。
+     * <p>
+     * 拉取成功后 {@link FeedRepository#addVideosBlocking} 会触发
+     * {@link #onBufferChanged}，由既有逻辑自动开始播放，无需在此直接开播。
+     */
+    private void fetchNativeFeedInitial() {
+        new Thread(() -> {
+            final java.util.List<mulin.tvdy.data.FeedVideo> videos =
+                    mulin.tvdy.data.NativeFeedClient.fetch(10);
+            if (videos == null || videos.isEmpty()) return;
+            handler.post(() -> {
+                try {
+                    repository.addVideosBlocking(videos);
+                    StartupTrace.mark("startup: native feed applied n=" + videos.size()
+                            + " buffer=" + repository.bufferSize());
+                } catch (Exception e) {
+                    Log.w(TAG, "native feed apply failed", e);
+                }
+            });
+        }, "native-feed-initial").start();
     }
 
     /**
