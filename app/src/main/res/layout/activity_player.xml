@@ -392,7 +392,21 @@
             <TextView
                 android:id="@+id/featureMenuLoginText"
                 style="@style/FeatureMenuLabel"
-                android:text="登录账号" />
+                android:text="扫码登录（推荐）" />
+
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/featureMenuCookieLogin"
+            style="@style/FeatureMenuRow">
+
+            <ImageView
+                style="@style/FeatureMenuIcon"
+                android:src="@drawable/ic_account" />
+
+            <TextView
+                style="@style/FeatureMenuLabel"
+                android:text="手动导入 Cookie（备用）" />
 
         </LinearLayout>
 
@@ -628,5 +642,7 @@
     <include layout="@layout/overlay_creator_grid" />
 
     <include layout="@layout/overlay_comments" />
+
+    <include layout="@layout/overlay_login_qr" />
 
 </FrameLayout>

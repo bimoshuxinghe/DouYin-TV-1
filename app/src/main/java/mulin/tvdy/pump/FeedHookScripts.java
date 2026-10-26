@@ -139,6 +139,24 @@ final class FeedHookScripts {
                     + "}"
                     + "setInterval(neutralizeVideos,1000);"
                     + "neutralizeVideos();"
+                    // 页面可见性伪装：这是隐藏 WebView 的关键前提之一。
+                    // 抖音的 SPA 在 document.hidden/visibilityState 为 hidden 时会
+                    // 认为页面不可见而推迟甚至不加载 feed —— 这正是部分电视上
+                    // 出现"WebView 未捕获到抖音 API 请求"的原因之一。这里把
+                    // 可见性相关 API 全部伪装为"前台可见"，让页面照常取数。
+                    + "(function(){"
+                    + "try{"
+                    + "Object.defineProperty(document,'visibilityState',{get:function(){return 'visible';},configurable:true});"
+                    + "Object.defineProperty(document,'hidden',{get:function(){return false;},configurable:true});"
+                    + "Object.defineProperty(document,'webkitVisibilityState',{get:function(){return 'visible';},configurable:true});"
+                    + "Object.defineProperty(document,'webkitHidden',{get:function(){return false;},configurable:true});"
+                    + "Object.defineProperty(document,'prerendering',{get:function(){return false;},configurable:true});"
+                    + "document.hasFocus=function(){return true;};"
+                    + "try{document.dispatchEvent(new Event('visibilitychange'));}catch(e){}"
+                    + "try{window.dispatchEvent(new Event('visibilitychange'));}catch(e){}"
+                    + "console.log('tvdy-pump visibility forced visible');"
+                    + "}catch(e){}"
+                    + "})();"
                     // Keep pump on feed so acrawler/sign stays usable for creator/history.
                     + "setInterval(function(){"
                     + "try{"
