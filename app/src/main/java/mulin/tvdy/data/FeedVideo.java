@@ -53,6 +53,14 @@ public final class FeedVideo {
     /** Whether the logged-in account had already digged this item in the feed payload. */
     public final boolean userDigged;
 
+    /**
+     * Music/track title from the aweme's music object, shown in the
+     * TikTok-TV-style "♫" info row. Mutable (not final) so the snapshot
+     * round-trip can restore it without changing the constructor signature
+     * that the JVM unit test also uses; absent for older snapshots.
+     */
+    public String musicTitle;
+
     /** Paired video-only + audio-only progressive CDN URLs. */
     public static final class SplitPlayUrl {
         public final String videoUrl;
@@ -168,9 +176,15 @@ public final class FeedVideo {
         boolean userDigged = item.optInt("user_digged", 0) == 1
                 || item.optBoolean("user_digged", false);
 
-        return new FeedVideo(awemeId, desc, coverUrl, playUrl, candidates, splits,
+        FeedVideo v = new FeedVideo(awemeId, desc, coverUrl, playUrl, candidates, splits,
                 authorName, authorAvatarUrl, authorSecUid, authorUniqueId,
                 diggCount, commentCount, collectCount, shareCount, userDigged);
+        JSONObject music = item.optJSONObject("music");
+        if (music != null) {
+            String musicTitle = music.optString("title", "").trim();
+            if (!musicTitle.isEmpty()) v.musicTitle = musicTitle;
+        }
+        return v;
     }
 
     /** True when this item has at least one video+audio split pair. */
@@ -223,6 +237,7 @@ public final class FeedVideo {
         if (collectCount != 0) o.put("cl", collectCount);
         if (shareCount != 0) o.put("sh", shareCount);
         if (userDigged) o.put("ud", true);
+        putIfNotEmpty(o, "mt", musicTitle);
 
         if (playUrlCandidates != null && !playUrlCandidates.isEmpty()) {
             JSONArray muxed = new JSONArray();
@@ -290,13 +305,16 @@ public final class FeedVideo {
         }
         if (playUrl.isEmpty()) return null;
 
-        return new FeedVideo(awemeId, o.optString("d", ""), o.optString("c", null),
+        FeedVideo v = new FeedVideo(awemeId, o.optString("d", ""), o.optString("c", null),
                 playUrl, muxed, splits,
                 o.optString("an", ""), o.optString("au", null),
                 o.optString("as", ""), o.optString("ai", ""),
                 o.optLong("dg", 0), o.optLong("cm", 0),
                 o.optLong("cl", 0), o.optLong("sh", 0),
                 o.optBoolean("ud", false));
+        String musicTitle = o.optString("mt", "");
+        if (!musicTitle.isEmpty()) v.musicTitle = musicTitle;
+        return v;
     }
 
     private static void putIfNotEmpty(JSONObject o, String key, String value)

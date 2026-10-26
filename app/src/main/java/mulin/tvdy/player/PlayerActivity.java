@@ -232,6 +232,9 @@ public class PlayerActivity extends Activity implements FeedRepository.Listener 
      * before the pump's fresh data arrives. See {@link #onPlayerError}.
      */
     private int snapshotSourcedItems = 0;
+
+    /** 上次会话的快照，仅作断网兜底；正常启动时绝不自动续播。 */
+    private java.util.List<mulin.tvdy.data.FeedVideo> offlineFallbackVideos;
     private long startupTimeoutMs;
     private boolean pendingStartupLoginCheck = false;
     private FrameLayout slideHost;
@@ -258,6 +261,7 @@ public class PlayerActivity extends Activity implements FeedRepository.Listener 
     private View bottomPanel;
     private TextView titleText;
     private TextView authorText;
+    private TextView musicText;
     private ImageView avatarImage;
     private TextView positionText;
     private TextView durationText;
@@ -377,6 +381,7 @@ public class PlayerActivity extends Activity implements FeedRepository.Listener 
         bottomPanel = findViewById(R.id.bottomPanel);
         titleText = findViewById(R.id.titleText);
         authorText = findViewById(R.id.authorText);
+        musicText = findViewById(R.id.musicText);
         avatarImage = findViewById(R.id.avatarImage);
         positionText = findViewById(R.id.positionText);
         durationText = findViewById(R.id.durationText);
@@ -764,57 +769,47 @@ public class PlayerActivity extends Activity implements FeedRepository.Listener 
     }
 
     /**
-     * Loads the last saved feed snapshot so {@link #startInitialPlayback} has
-     * something to play without waiting for the pump's WebView.
+     * 快照不再用于冷启动「秒开续播」，而是留作断网兜底。
      * <p>
-     * This is the whole point of the snapshot: the SPA boot plus the page's own
-     * feed XHR cost ~31s end to end on the TV, while reading a few tens of KB
-     * off internal storage costs single-digit milliseconds. The pump still runs
-     * and will replace these items as soon as its own capture lands, so a
-     * snapshot whose signed CDN links have expired degrades to the previous
-     * behaviour (candidate retry, then fresh data) rather than breaking.
+     * 之前的行为是把上次会话的视频立刻灌进队列播放，用户每次打开看到的都是
+     * 退出前的画面，体验不像抖音「打开就有新推荐」。现在改为：冷启动始终等
+     * 数据泵拉取最新推荐流；只有在启动超时（通常意味着断网/抖音不可达）时，
+     * 才把快照灌进队列兜底播放。
      */
     private void primeRepositoryFromSnapshot() {
         try {
             java.util.List<mulin.tvdy.data.FeedVideo> videos = FeedSnapshotStore.read(this);
             if (videos == null || videos.isEmpty()) return;
-            int before = repository.bufferSize();
-            // Blocking: the whole point of the snapshot is to have the first
-            // item ready before ExoPlayer is built, and a cross-thread round
-            // trip here would only add latency to the path we are trying to
-            // shorten. The videos arrive already distilled, so this is a few
-            // tens of milliseconds - see FeedSnapshotStore.
-            repository.addVideosBlocking(videos);
-            int accepted = Math.max(0, repository.bufferSize() - before);
-            snapshotSourcedItems = accepted;
-            StartupTrace.mark("startup: repository primed from snapshot n=" + videos.size()
-                    + " accepted=" + accepted
-                    + " buffer=" + repository.bufferSize());
-            if (before > 0) {
-                // Warm restart: the process outlived the last Activity, so the
-                // repository singleton still holds playable videos. The snapshot
-                // adding nothing here means its items are duplicates of what is
-                // already queued, not that the fast path failed - so the queue
-                // must be kept. These items are of the same vintage as the
-                // snapshot (the last session's capture), so they carry the same
-                // stale-link risk: mark them snapshot-sourced so a dead link
-                // still degrades to the pump instead of flicking through the
-                // rest of the queue as black frames.
-                snapshotSourcedItems = repository.bufferSize();
-                StartupTrace.mark("startup: reusing warm buffer n=" + before);
-                return;
-            }
-            // Cold start with everything in the snapshot already watched on this
-            // account, so there is nothing to show for the fast path. Forget the
-            // snapshot so the pump's fresh capture is not treated as duplicate,
-            // and let the normal splash-and-wait flow take over.
-            if (accepted == 0) {
-                StartupTrace.mark("startup: snapshot fully filtered, using pump");
-                repository.reset();
-            }
+            // 只暂存不灌入：等 onStartupTimeout 判断确实拿不到新数据时再用。
+            offlineFallbackVideos = videos;
+            StartupTrace.mark("startup: snapshot kept as offline fallback n=" + videos.size());
         } catch (Exception e) {
             Log.w(TAG, "snapshot priming failed", e);
         }
+    }
+
+    /**
+     * 启动超时时的断网兜底：数据泵一直没能产出视频（断网/抖音不可达），
+     * 而本地留有上次会话的快照，就先播快照，聊胜于无。
+     *
+     * @return {@code true} 表示已用快照兜底启动播放，调用方无需继续重试。
+     */
+    private boolean tryStartFromOfflineFallback() {
+        if (offlineFallbackVideos == null || offlineFallbackVideos.isEmpty()) return false;
+        if (repository.bufferSize() > 0) return false;
+        Log.w(TAG, "pump timed out, falling back to offline snapshot n="
+                + offlineFallbackVideos.size());
+        StartupTrace.mark("startup: using offline snapshot fallback");
+        try {
+            repository.addVideosBlocking(offlineFallbackVideos);
+        } catch (Exception e) {
+            Log.w(TAG, "offline fallback priming failed", e);
+            return false;
+        }
+        offlineFallbackVideos = null;
+        snapshotSourcedItems = repository.bufferSize();
+        startInitialPlayback();
+        return playlistIndex >= 0;
     }
 
     /**
@@ -843,7 +838,7 @@ public class PlayerActivity extends Activity implements FeedRepository.Listener 
             player.stop();
             player.clearMediaItems();
         }
-        updateSplashStatus("正在加载视频…");
+        updateSplashStatus("正在获取最新推荐…");
         // Re-arm the timeout: the splash has been up since onCreate and the
         // pump now has to fetch from scratch.
         scheduleStartupTimeout();
@@ -983,6 +978,11 @@ public class PlayerActivity extends Activity implements FeedRepository.Listener 
 
     private void onStartupTimeout() {
         if (!splashVisible || repository.bufferSize() > 0) return;
+        // 数据泵拿不到新数据时，先用上次会话的快照兜底（断网也能看）。
+        if (tryStartFromOfflineFallback()) {
+            hideSplashIfNeeded();
+            return;
+        }
         if (startupRetryCount < MAX_STARTUP_RETRIES) {
             startupRetryCount++;
             updateSplashStatus("加载较慢，自动重试 (" + startupRetryCount + "/" + MAX_STARTUP_RETRIES + ")…");
@@ -2193,6 +2193,10 @@ public class PlayerActivity extends Activity implements FeedRepository.Listener 
         authorText.setVisibility(hasAuthor ? View.VISIBLE : View.GONE);
         authorText.setText(hasAuthor ? "@" + video.authorName : "");
         titleText.setText(highlightHashtags(video.desc == null ? "" : video.desc));
+        // TikTok TV 风格的 "♫ 音乐名" 行
+        boolean hasMusic = video.musicTitle != null && !video.musicTitle.isEmpty();
+        musicText.setVisibility(hasMusic ? View.VISIBLE : View.GONE);
+        musicText.setText(hasMusic ? "♫ " + video.musicTitle : "");
     }
 
     /** Colors "#tag" tokens to match douyin's own hashtag styling in the caption/title. */

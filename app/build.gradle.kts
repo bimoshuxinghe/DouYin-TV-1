@@ -14,8 +14,8 @@ android {
         applicationId = "mulin.tvdy"
         minSdk = 21
         targetSdk = 35
-        versionCode = 61
-        versionName = "1.0.2"
+        versionCode = 62
+        versionName = "1.1.0"
 
     }
 
