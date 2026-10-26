@@ -299,6 +299,20 @@ public class PlayerActivity extends Activity implements FeedRepository.Listener 
         }
     };
     private int loginQrPollTicks = 0;
+
+    // --- 官方扫码登录(API 版，无需 WebView) ---
+    private View qrApiOverlay;
+    private ImageView qrApiImage;
+    private TextView qrApiStatusText;
+    private boolean qrApiVisible = false;
+    private String qrApiToken;
+    private final Runnable qrApiPollRunnable = new Runnable() {
+        @Override
+        public void run() {
+            pollQrLoginStatus();
+        }
+    };
+    private int qrApiPollTicks = 0;
     /** 当前面板正在展示的评论所属视频，避免切视频后旧评论串台。 */
     private String commentsForAwemeId;
     private CommentsAdapter commentsAdapter;
@@ -438,6 +452,11 @@ public class PlayerActivity extends Activity implements FeedRepository.Listener 
         loginQrOverlay = findViewById(R.id.loginQrOverlay);
         loginQrWebView = findViewById(R.id.loginQrWebView);
         loginQrStatusText = findViewById(R.id.loginQrStatusText);
+
+        // 官方扫码登录(API 版)
+        qrApiOverlay = findViewById(R.id.qrApiOverlay);
+        qrApiImage = findViewById(R.id.qrApiImage);
+        qrApiStatusText = findViewById(R.id.qrApiStatusText);
         commentsList.setLayoutManager(new LinearLayoutManager(this));
         commentsAdapter = new CommentsAdapter();
         commentsList.setAdapter(commentsAdapter);
@@ -1157,7 +1176,7 @@ public class PlayerActivity extends Activity implements FeedRepository.Listener 
         }
 
         // 扫码登录页打开时：除返回键外全部吞掉，避免误触发视频操作。
-        if (loginQrVisible) {
+        if (loginQrVisible || qrApiVisible) {
             return true;
         }
 
@@ -1302,6 +1321,9 @@ public class PlayerActivity extends Activity implements FeedRepository.Listener 
         if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) {
             if (cookieLoginVisible) {
                 hideCookieLogin();
+                backConsumedSpecially = true;
+            } else if (qrApiVisible) {
+                closeApiQrLogin();
                 backConsumedSpecially = true;
             } else if (loginQrVisible) {
                 closeQrLogin();
@@ -1509,6 +1531,112 @@ public class PlayerActivity extends Activity implements FeedRepository.Listener 
     }
 
     /**
+     * 官方扫码登录(API 直连)：调用 login.douyin.com 的二维码接口拿到官方二维码，
+     * 手机抖音扫码并确认后，访问回调地址取得登录 Cookie 并写入全局 CookieManager。
+     * 全程不需要 WebView，也不需要在手机上复制粘贴 Cookie。
+     */
+    private void openApiQrLogin() {
+        qrApiVisible = true;
+        qrApiOverlay.setVisibility(View.VISIBLE);
+        qrApiStatusText.setTextColor(0xFFFFD54F);
+        qrApiStatusText.setText("正在获取登录二维码…");
+        qrApiImage.setImageBitmap(null);
+        qrApiPollTicks = 0;
+
+        new Thread(() -> {
+            final mulin.tvdy.auth.QrLoginClient.QrCode qr =
+                    mulin.tvdy.auth.QrLoginClient.fetchQrCode();
+            handler.post(() -> {
+                if (!qrApiVisible) return;
+                if (qr == null) {
+                    qrApiStatusText.setTextColor(0xFFFF5252);
+                    qrApiStatusText.setText("获取二维码失败(网络受限或抖音风控)，可改用「网页登录」");
+                    return;
+                }
+                qrApiToken = qr.token;
+                qrApiImage.setImageBitmap(qr.bitmap);
+                qrApiStatusText.setTextColor(0xFFFFFFFF);
+                qrApiStatusText.setText("请用抖音 App 扫码");
+                handler.postDelayed(qrApiPollRunnable, 2000);
+            });
+        }, "qr-login-fetch").start();
+    }
+
+    private void pollQrLoginStatus() {
+        if (!qrApiVisible || qrApiToken == null) return;
+        qrApiPollTicks++;
+        final String token = qrApiToken;
+        new Thread(() -> {
+            final mulin.tvdy.auth.QrLoginClient.PollResult result =
+                    mulin.tvdy.auth.QrLoginClient.poll(token);
+            handler.post(() -> {
+                if (!qrApiVisible || !token.equals(qrApiToken)) return;
+                if (result == null) {
+                    // 单次查询失败不打断流程，继续轮询。
+                    scheduleNextQrPoll();
+                    return;
+                }
+                switch (result.status) {
+                    case mulin.tvdy.auth.QrLoginClient.STATUS_WAITING:
+                        qrApiStatusText.setTextColor(0xFFFFFFFF);
+                        qrApiStatusText.setText("请用抖音 App 扫码");
+                        scheduleNextQrPoll();
+                        break;
+                    case mulin.tvdy.auth.QrLoginClient.STATUS_SCANNED:
+                        qrApiStatusText.setTextColor(0xFF69F0AE);
+                        qrApiStatusText.setText("已扫码，请在手机上点“确认登录”");
+                        scheduleNextQrPoll();
+                        break;
+                    case mulin.tvdy.auth.QrLoginClient.STATUS_CONFIRMED:
+                        qrApiStatusText.setTextColor(0xFF69F0AE);
+                        qrApiStatusText.setText("已确认，正在完成登录…");
+                        finishQrLogin(result.redirectUrl);
+                        break;
+                    case mulin.tvdy.auth.QrLoginClient.STATUS_EXPIRED:
+                        qrApiStatusText.setTextColor(0xFFFF5252);
+                        qrApiStatusText.setText("二维码已过期，请在菜单里重新点击扫码登录");
+                        break;
+                    default:
+                        scheduleNextQrPoll();
+                        break;
+                }
+            });
+        }, "qr-login-poll").start();
+    }
+
+    private void scheduleNextQrPoll() {
+        if (qrApiPollTicks > 150) { // 约 5 分钟
+            qrApiStatusText.setTextColor(0xFFFF5252);
+            qrApiStatusText.setText("等待超时，请在菜单里重新点击扫码登录");
+            return;
+        }
+        handler.postDelayed(qrApiPollRunnable, 2000);
+    }
+
+    private void finishQrLogin(String redirectUrl) {
+        new Thread(() -> {
+            final String cookie = mulin.tvdy.auth.QrLoginClient.completeLogin(redirectUrl);
+            handler.post(() -> {
+                if (!qrApiVisible) return;
+                if (cookie == null || cookie.isEmpty()) {
+                    qrApiStatusText.setTextColor(0xFFFF5252);
+                    qrApiStatusText.setText("登录回调未取到 Cookie，请重试或改用「网页登录」");
+                    return;
+                }
+                applyWebCookieAndFinish(cookie, "扫码登录");
+            });
+        }, "qr-login-complete").start();
+    }
+
+    private void closeApiQrLogin() {
+        qrApiVisible = false;
+        handler.removeCallbacks(qrApiPollRunnable);
+        qrApiToken = null;
+        if (qrApiOverlay != null) qrApiOverlay.setVisibility(View.GONE);
+        if (playerView != null) playerView.requestFocus();
+    }
+
+    /**
      * 扫码登录：用可见 WebView 打开抖音官方登录页，电视上直接显示官方二维码，
      * 手机抖音扫一下就完成登录。相比旧的"扫码后在手机上复制粘贴 Cookie"
      * 方式，这里完全不需要手机端手工操作 Cookie。
@@ -1568,7 +1696,7 @@ public class PlayerActivity extends Activity implements FeedRepository.Listener 
                 loginQrStatusText.setTextColor(0xFF69F0AE);
                 loginQrStatusText.setText("检测到登录状态，正在验证…");
                 CookieManager.getInstance().flush();
-                applyWebCookieAndFinish(cookie);
+                applyWebCookieAndFinish(cookie, "网页登录");
                 return;
             }
         } catch (Exception e) {
@@ -1587,16 +1715,22 @@ public class PlayerActivity extends Activity implements FeedRepository.Listener 
      * {@link CookieImportHelper} 写入，再用 {@link LoginStatusChecker}
      * 向抖音服务器确认，成功后刷新登录态与播放流。
      */
-    private void applyWebCookieAndFinish(String raw) {
+    /**
+     * @param raw    从网页登录页或扫码回调拿到的 Cookie 串
+     * @param source 登录方式(用于提示文案)，例如"扫码登录"/"网页登录"
+     */
+    private void applyWebCookieAndFinish(String raw, String source) {
         if (verifyingLogin) return;
+        final TextView statusView = qrApiVisible ? qrApiStatusText : loginQrStatusText;
+        if (statusView == null) return;
         if (!CookieImportHelper.apply(raw)) {
-            loginQrStatusText.setTextColor(0xFFFF5252);
-            loginQrStatusText.setText("未获取到有效登录信息，请重新扫码");
+            statusView.setTextColor(0xFFFF5252);
+            statusView.setText("未获取到有效登录信息，请重新" + source);
             return;
         }
         verifyingLogin = true;
-        loginQrStatusText.setTextColor(0xFFFFD54F);
-        loginQrStatusText.setText("Cookie 已应用，正在向抖音服务器验证…");
+        statusView.setTextColor(0xFFFFD54F);
+        statusView.setText("Cookie 已应用，正在向抖音服务器验证…");
         new LoginStatusChecker().check(this, (ViewGroup) findViewById(R.id.playerRoot),
                 new LoginStatusChecker.Callback() {
                     @Override
@@ -1606,20 +1740,24 @@ public class PlayerActivity extends Activity implements FeedRepository.Listener 
                             setLoginState(true, nickname, avatarUrl);
                             Toast.makeText(PlayerActivity.this,
                                     "登录成功：" + nickname, Toast.LENGTH_LONG).show();
-                            closeQrLogin();
+                            if (qrApiVisible) {
+                                closeApiQrLogin();
+                            } else {
+                                closeQrLogin();
+                            }
                             resetPlaybackAndFeed();
                         } else {
                             setLoginState(false, null, null);
-                            loginQrStatusText.setTextColor(0xFFFF5252);
-                            loginQrStatusText.setText("服务器判定未登录，请重新扫码");
+                            statusView.setTextColor(0xFFFF5252);
+                            statusView.setText("服务器判定未登录，请重新" + source);
                         }
                     }
 
                     @Override
                     public void onCheckFailed() {
                         verifyingLogin = false;
-                        loginQrStatusText.setTextColor(0xFFFF5252);
-                        loginQrStatusText.setText("验证超时，请检查网络后重新扫码");
+                        statusView.setTextColor(0xFFFF5252);
+                        statusView.setText("验证超时，请检查网络后重新" + source);
                     }
                 });
     }
@@ -1780,6 +1918,8 @@ public class PlayerActivity extends Activity implements FeedRepository.Listener 
         closeFeatureMenu();
         int id = item.getId();
         if (id == R.id.featureMenuLogin) {
+            openApiQrLogin();
+        } else if (id == R.id.featureMenuWebLogin) {
             openQrLogin();
         } else if (id == R.id.featureMenuCookieLogin) {
             startCookieLogin();
@@ -1808,6 +1948,7 @@ public class PlayerActivity extends Activity implements FeedRepository.Listener 
             featureMenuLogin.setVisibility(View.VISIBLE);
             featureMenuLogout.setVisibility(View.GONE);
             menuItems.add(featureMenuLogin);
+            menuItems.add(findViewById(R.id.featureMenuWebLogin));
             menuItems.add(findViewById(R.id.featureMenuCookieLogin));
             menuItems.add(findViewById(R.id.featureMenuCreator));
             menuItems.add(findViewById(R.id.featureMenuComments));

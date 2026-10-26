@@ -397,6 +397,20 @@
         </LinearLayout>
 
         <LinearLayout
+            android:id="@+id/featureMenuWebLogin"
+            style="@style/FeatureMenuRow">
+
+            <ImageView
+                style="@style/FeatureMenuIcon"
+                android:src="@drawable/ic_account" />
+
+            <TextView
+                style="@style/FeatureMenuLabel"
+                android:text="网页登录（备用）" />
+
+        </LinearLayout>
+
+        <LinearLayout
             android:id="@+id/featureMenuCookieLogin"
             style="@style/FeatureMenuRow">
 
@@ -644,5 +658,7 @@
     <include layout="@layout/overlay_comments" />
 
     <include layout="@layout/overlay_login_qr" />
+
+    <include layout="@layout/overlay_qr_api" />
 
 </FrameLayout>
